@@ -1,0 +1,159 @@
+description: >-
+  The billing desk's one tool. Pick what it does with `action`. Use
+  look_up_invoice when the caller gives you an invoice number, list_open_invoices
+  when they do not have the number and can name their account instead, and
+  log_dispute once the caller has agreed which invoice it is and told you what
+  is wrong with it. Never call log_dispute before a lookup has returned an
+  invoice: a case against a number nobody found goes nowhere.
+
+# One tool, three actions, one argument list. Every action ignores the
+# arguments it does not need, which is why only `action` is required: a lookup
+# that had to send eight empty fields would be a worse contract, not a safer
+# one.
+#
+# An optional property is passed on every call as an empty string, so the
+# handler treats "" as "not given" rather than relying on a Python default.
+input:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - look_up_invoice
+        - list_open_invoices
+        - log_dispute
+      description: Which of the three things to do.
+    invoice_number:
+      type: string
+      description: >-
+        The invoice number the caller read out, digits and dashes as it is
+        written on the invoice. Needed by look_up_invoice.
+    account:
+      type: string
+      description: >-
+        The company name the caller gives. Needed by list_open_invoices, and
+        ignored by the other two.
+    reason:
+      type: string
+      enum:
+        - pricing
+        - quantity
+        - duplicate_invoice
+        - goods_not_received
+        - service_quality
+        - tax_or_vat
+        - wrong_po_number
+        - other
+      description: >-
+        What is wrong with the invoice, in one of the eight words listed. Work
+        it out from what the caller said rather than reading the list to them.
+    disputed_amount:
+      type: number
+      description: >-
+        How much of the invoice is in dispute, as a plain number in the
+        invoice's own currency, with no symbol and no thousands separator. The
+        whole amount when the caller disputes the whole invoice.
+    rest_will_be_paid:
+      type: boolean
+      description: >-
+        True when the caller says the undisputed part of the invoice will still
+        be paid on time, false when they are holding the whole invoice.
+    raised_by:
+      type: string
+      description: The name of the person on the call, so the team can ring them back.
+    evidence:
+      type: string
+      description: >-
+        What the caller says they can send, in a few words, separated by commas.
+        Leave it out when they offer nothing.
+    detail:
+      type: string
+      description: One sentence in the caller's own words saying what is wrong.
+  required:
+    - action
+
+# `case` is written out property by property rather than left as a bare object.
+# The second step ends on this tool, so its result is saved straight into the
+# DisputeCase shape with no model request in between, and the compiler checks
+# the two agree before it will compile the package.
+output:
+  type: object
+  properties:
+    status:
+      type: string
+      enum:
+        - found
+        - not_found
+        - listed
+        - recorded
+        - rejected
+    invoice:
+      type: object
+      properties:
+        invoice_number:
+          type: string
+        account:
+          type: string
+        issued_on:
+          type: string
+        due_on:
+          type: string
+        amount:
+          type: number
+        currency:
+          type: string
+        status:
+          type: string
+    invoices:
+      type: array
+      items:
+        type: object
+    case:
+      type: object
+      properties:
+        case_id:
+          type: string
+        invoice_number:
+          type: string
+        reason:
+          type: string
+          enum:
+            - pricing
+            - quantity
+            - duplicate_invoice
+            - goods_not_received
+            - service_quality
+            - tax_or_vat
+            - wrong_po_number
+            - other
+        disputed_amount:
+          type: number
+        rest_will_be_paid:
+          type: boolean
+        raised_by:
+          type: string
+        evidence:
+          type: array
+          items:
+            type: string
+        routed_to:
+          type: string
+          enum:
+            - billing
+            - sales
+            - logistics
+            - tax
+        opened_on:
+          type: string
+    problem:
+      type: string
+  required:
+    - status
+
+local:
+  handler: tools/dispute_desk.py
+
+# No announce. Every action here is an in-process dictionary read, so a line
+# covering the wait would be longer than the wait.
+interruption: provider_default
+effect: returns_data
