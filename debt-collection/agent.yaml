@@ -1,0 +1,276 @@
+version: 1
+
+name: debt-collection
+
+entry_agent: collections_agent
+
+agents:
+  collections_agent:
+    instructions: instructions.md
+    think: reasoning
+    speak: voice
+    tools:
+      - end_call
+    tasks:
+      - name: verify_account
+        when: >-
+          Run only when the caller explicitly corrects the account reference or
+          the date of birth they already gave. Every other route into
+          verification goes through the payment flow, which runs this step
+          itself when the account is not confirmed. Asking what is owed is not
+          a correction.
+        instructions: tasks/verify-account.md
+        tools:
+          - verify_account_holder
+        finish:
+          - tool: verify_account_holder
+            success:
+              - status:
+                  - verified
+        assign:
+          - account_reference: result.account_reference
+          - customer_name: result.customer_name
+          - balance_due: result.balance_due
+          - days_past_due: result.days_past_due
+        context:
+          history: messages
+
+      - name: arrange_payment
+        instructions: tasks/arrange-payment.md
+        tools:
+          - manage_payment
+        handoffs:
+          - to_disputes
+        finish:
+          - tool: manage_payment
+            success:
+              - status:
+                  - paid
+                  - scheduled
+                  - plan_started
+        assign:
+          - arrangement: result.arrangement
+        context:
+          history: messages
+    task_groups:
+      - collect
+    handoffs:
+      - to_disputes
+
+  dispute_specialist:
+    instructions: agents/dispute-specialist.md
+    think: reasoning
+    speak: voice
+    tools:
+      - end_call
+    tasks:
+      # Deliberately not verify_account. The collections agent is the only one
+      # that verifies. A task in reach beats a prompt rule, so the task is not
+      # listed here. Every tool that needs the account refuses while it is
+      # unconfirmed, and to_collections is the way back.
+      - name: handle_dispute
+        when: The verified caller wants a dispute recorded against what they owe.
+        instructions: tasks/handle-dispute.md
+        tools:
+          - manage_dispute
+        handoffs:
+          - to_collections
+        finish:
+          - tool: manage_dispute
+            success:
+              - status:
+                  - opened
+        assign:
+          - disputes+: result.dispute
+        context:
+          history: messages
+    handoffs:
+      - to_collections
+
+handoffs:
+  to_disputes:
+    to: dispute_specialist
+    when: >-
+      The caller says the debt is not theirs, does not recognise it, says it was
+      already paid, or challenges the amount.
+    context:
+      history: messages
+
+  to_collections:
+    to: collections_agent
+    when: The caller wants to pay or set something up instead of disputing.
+    context:
+      history: messages
+
+shapes:
+  - name: Arrangement
+    description: The payment arrangement the caller agreed to, saved only after it succeeded.
+    fields:
+      - arrangement_id: Id
+      - kind: Literal["pay_now", "schedule", "plan"]
+      - amount: float
+      - first_payment_date: Date
+      - installments: int
+
+  - name: Dispute
+    description: >-
+      One dispute opened on this call. Opening one records what the caller says;
+      it is not an agreement that they are right, and it cancels no balance.
+    fields:
+      - dispute_id: Id
+      - reason: str
+      - amount_disputed: float
+
+# One request to settle the balance, start to finish, with no owner request
+# between the two steps. Verification is skipped when the account is already
+# confirmed, which is every arrangement after the first on a call.
+task_groups:
+  collect:
+    when: >-
+      The caller wants to pay, move a payment, set up an arrangement, or asks
+      what is owed. Includes a change to an arrangement just made.
+    steps:
+      - task: verify_account
+        skip_when_confirmed: account_reference
+      - arrange_payment
+    context_scope: shared
+    then: return
+
+variables:
+  current_date:
+    type: Date
+    default: ""
+    description: >-
+      Today's date where the agency works, YYYY-MM-DD. Read once from the clock
+      before the greeting, so a caller saying "the first of next month" costs
+      one model request instead of two chained tool calls. A call that crosses
+      midnight keeps the day it started on, which is deliberate: a date changing
+      underneath a conversation would leave the caller and the agent disagreeing
+      about when the first payment lands.
+
+  current_weekday:
+    type: str
+    default: ""
+    description: >-
+      The weekday today falls on, spelled out in English: Monday to Sunday. From
+      the same clock reading as current_date, so the two cannot disagree about
+      which day it is. It is what lets the agent turn "next Friday, when I get
+      paid" into a real date without a second turn.
+
+  account_reference:
+    type: Id
+    default: ""
+    confirm: verify_account
+    description: >-
+      The account the caller is talking about, in the shape the ledger holds it:
+      two capital letters, a hyphen, then digits. One shape everywhere in this
+      package, so no prompt and no tool has to guess which one it is holding.
+
+      Offered to the caller for a yes, never acted on unasked. Until the
+      verification step has heard them agree, this value appears in no prompt but
+      that step's own, and every tool holding it refuses. That is the whole
+      right-party rule: nothing about a debt is said out loud to somebody who has
+      not shown the account is theirs.
+
+  customer_name:
+    type: str
+    default: ""
+    description: >-
+      The name on the account, from the same check that verified it. Used to
+      speak to the caller by name once the account is theirs, and for nothing
+      else.
+
+  balance_due:
+    type: float
+    default: 0.0
+    description: >-
+      What is outstanding on the account in pounds, as the ledger had it at
+      verification. A payment taken later in the call does not rewrite this, so
+      read the latest amount off the payment tool rather than from here once one
+      has run.
+
+  days_past_due:
+    type: int
+    default: 0
+    description: >-
+      How long the account has been past due. It changes what the agent offers,
+      not how hard it pushes: a balance two months overdue is where an instalment
+      plan is worth raising first.
+
+  arrangement:
+    type: Arrangement | None
+    description: The latest successful payment action, saved only after the tool succeeded.
+
+  disputes:
+    type: list[Dispute]
+    description: Disputes opened during this call.
+
+prefetch:
+  - name: today
+    clock: now
+    timezone: Europe/London
+    assign:
+      - current_date: result.date
+      - current_weekday: result.day_of_week
+
+secrets:
+  - GOOGLE_API_KEY
+  - SLNG_API_KEY
+
+models:
+  think:
+    reasoning:
+      provider: google
+      model: gemini-3.5-flash-lite
+      params:
+        vertexai: true
+        location: eu
+        thinking_config:
+          thinking_level: minimal
+  speak:
+    voice:
+      provider: slng
+      model: "cartesia/sonic:3.5"
+      voice: "62ae83ad-4f6a-430b-af41-a9bede9286ca"
+      language: en
+      params:
+        world_part: eu-north
+        warm_standby_enabled: true
+  listen:
+    transcriber:
+      provider: slng
+      model: "soniox/speech-ai:rt-v5"
+      language: en
+      params:
+        world_part: eu-north
+  turn:
+    detector:
+      provider: local
+      model: silero
+      pace: balanced
+
+tools:
+  - verify_account_holder
+  - manage_payment
+  - manage_dispute
+  - end_call
+
+conversation:
+  greeting:
+    speaks_first: agent
+    text: "Hi, this is Robin from Meridian Recovery. I'm trying to reach the holder of an account we look after. Have I got the right person?"
+  interruption:
+    enabled: true
+  inactivity:
+    nudge_after: 15s
+    end_after: 45s
+  max_duration: 10m
+
+channels:
+  web:
+    kind: realtime_audio
+
+capacity:
+  peak_sessions: 5
+  max_sessions: 10
+  avg_session_duration: 5m

@@ -1,0 +1,91 @@
+description: >-
+  Open a dispute against what the verified account owes, or read back the
+  disputes already on it. Opening one puts collection on hold while somebody
+  reviews it, and sends the caller the paperwork. It records what the caller
+  says; it does not agree with them and it clears no balance. The account comes
+  from verification and is never supplied or guessed by you.
+
+input:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - open
+        - list
+      description: >-
+        open records a new dispute and starts the hold. list reads back what is
+        already on the account and changes nothing.
+    reason:
+      type: string
+      description: >-
+        What the caller says is wrong, in their own terms, one short factual
+        sentence. Send an empty string for list.
+    amount_disputed:
+      type: number
+      description: >-
+        How much of the balance is being challenged, in pounds. Send 0 when the
+        caller disputes the whole thing, and 0 for list.
+    confirmed:
+      type: boolean
+      description: >-
+        True only after the caller has agreed to the summary you read back.
+        Send false for list.
+  required:
+    - action
+    - reason
+    - amount_disputed
+    - confirmed
+
+inject:
+  - account_reference: "{{account_reference}}"
+
+output:
+  type: object
+  properties:
+    status:
+      type: string
+      enum:
+        - opened
+        - listed
+        - not_confirmed
+        - invalid_reason
+        - account_not_found
+    summary:
+      type: string
+    hold_until:
+      type: string
+      description: The date collection stays on hold until, YYYY-MM-DD
+    dispute:
+      type: object
+      description: >-
+        The saved dispute, present and complete on success and absent otherwise.
+        The step saves this without asking the model for it.
+      properties:
+        dispute_id:
+          type: string
+        reason:
+          type: string
+        amount_disputed:
+          type: number
+    disputes:
+      type: array
+      description: What the account already holds, returned by list
+      items:
+        type: object
+        properties:
+          dispute_id:
+            type: string
+          reason:
+            type: string
+          amount_disputed:
+            type: number
+  required:
+    - status
+    - summary
+
+local:
+  handler: tools/ledger.py
+
+interruption: provider_default
+effect: returns_data

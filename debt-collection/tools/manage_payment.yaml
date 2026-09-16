@@ -1,0 +1,125 @@
+description: >-
+  Do one thing with the verified account's balance. Pick the action that matches
+  what the caller actually agreed to: take a payment now, book a single payment
+  for a later date, split the balance into monthly instalments, cancel what is
+  set up, or read back what the account already has. The account comes from
+  verification and is never supplied or guessed by you.
+
+  An account holds one arrangement at a time. Booking a second one over an
+  existing one is refused; cancel the old one first, or the caller is being told
+  their plan changed when it did not.
+
+input:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - pay_now
+        - schedule
+        - plan
+        - cancel
+        - list
+      description: >-
+        pay_now takes the amount today. schedule books one payment for a later
+        date. plan splits an amount into equal monthly instalments from a first
+        date. cancel removes the arrangement on the account. list reads back what
+        is on the account and changes nothing.
+    amount:
+      type: number
+      description: >-
+        The amount in pounds to take or book, or the total to spread for plan.
+        Send 0 for cancel and list.
+    first_payment_date:
+      type: string
+      description: >-
+        The date the payment lands, or the date the first instalment lands, in
+        YYYY-MM-DD form. Send an empty string for pay_now, cancel and list.
+    installments:
+      type: integer
+      description: >-
+        How many monthly instalments for plan, between 2 and 12. Send 1 for every
+        other action.
+    confirmed:
+      type: boolean
+      description: >-
+        True only after the caller has agreed to this exact amount and date.
+        Send false for list.
+  required:
+    - action
+    - amount
+    - first_payment_date
+    - installments
+    - confirmed
+
+inject:
+  - account_reference: "{{account_reference}}"
+
+output:
+  type: object
+  properties:
+    status:
+      type: string
+      enum:
+        - paid
+        - scheduled
+        - plan_started
+        - cancelled
+        - listed
+        - not_confirmed
+        - invalid_amount
+        - invalid_date
+        - invalid_installments
+        - has_arrangement
+        - nothing_to_cancel
+        - account_not_found
+    summary:
+      type: string
+    balance_remaining:
+      type: number
+      description: What is still outstanding after this call ran, in pounds
+    arrangement:
+      type: object
+      description: >-
+        The saved arrangement, present and complete on success and absent
+        otherwise. The step saves this without asking the model for it.
+      properties:
+        arrangement_id:
+          type: string
+        kind:
+          type: string
+          enum:
+            - pay_now
+            - schedule
+            - plan
+        amount:
+          type: number
+        first_payment_date:
+          type: string
+        installments:
+          type: integer
+    arrangements:
+      type: array
+      description: What the account already holds, returned by list and by has_arrangement
+      items:
+        type: object
+        properties:
+          arrangement_id:
+            type: string
+          kind:
+            type: string
+          amount:
+            type: number
+          first_payment_date:
+            type: string
+          installments:
+            type: integer
+  required:
+    - status
+    - summary
+
+local:
+  handler: tools/ledger.py
+
+interruption: provider_default
+effect: returns_data
