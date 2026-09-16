@@ -1,0 +1,395 @@
+version: 1
+
+name: multi-agent-handoff
+
+entry_agent: concierge
+
+agents:
+  concierge:
+    instructions: instructions.md
+    think: reasoning
+    speak: voice
+    tools:
+      - look_up_salon_info
+      - end_call
+    tasks:
+      - name: verify_customer
+        when: >-
+          Run only when the caller explicitly corrects their phone number. Every
+          other route into verification goes through the booking flow, which
+          runs this step itself when the saved number is not confirmed. A change
+          of date, time or service is not a phone correction.
+        instructions: tasks/verify-customer.md
+        tools:
+          - find_or_create_customer
+        finish:
+          - tool: find_or_create_customer
+            success:
+              - customer_status:
+                  - existing
+                  - created
+        assign:
+          - customer_phone: result.customer_phone
+          - customer_status: result.customer_status
+        context:
+          history: messages
+
+      - name: take_confirmation_contact
+        when: >-
+          Run when the caller wants the booking confirmation emailed to them, or
+          asks to change where it goes. Not needed for a caller who does not ask
+          for one, so it never blocks a booking.
+        instructions: tasks/confirmation-contact.md
+        assign:
+          - confirmation_contact: result.confirmation_contact
+          - confirmation_email: result.confirmation_contact.email
+        context:
+          history: messages
+
+      - name: manage_booking
+        instructions: tasks/booking.md
+        tools:
+          - list_bookings
+          - check_availability
+          - create_booking
+          - modify_booking
+          - cancel_booking
+        handoffs:
+          - to_complaints
+        finish:
+          - tool: create_booking
+            success:
+              - status: booked
+          - tool: modify_booking
+            success:
+              - status: modified
+          - tool: cancel_booking
+            success:
+              - status: cancelled
+        assign:
+          - appointment: result.appointment
+        context:
+          history: messages
+    task_groups:
+      - book
+    handoffs:
+      - to_complaints
+    escalations:
+      - to_manager
+
+  complaint_specialist:
+    instructions: agents/complaint-specialist.md
+    think: reasoning
+    speak: voice
+    tools:
+      - look_up_refund_policy
+      - end_call
+    tasks:
+      # Deliberately not verify_customer. The concierge is the only agent that
+      # verifies. A task in reach beats a prompt rule, so the task is not listed
+      # here. Every tool that needs the number refuses while it is unconfirmed,
+      # and to_concierge is the way back.
+      - name: handle_complaint
+        when: The verified caller wants a complaint recorded.
+        instructions: tasks/complaint.md
+        tools:
+          - record_complaint
+        handoffs:
+          - to_concierge
+          - to_complaints
+        finish:
+          - tool: record_complaint
+            success:
+              - status: recorded
+        assign:
+          - complaints+: result.complaint
+        context:
+          history: messages
+    handoffs:
+      - to_concierge
+    escalations:
+      - to_manager
+
+handoffs:
+  to_complaints:
+    to: complaint_specialist
+    when: The caller has a complaint or service problem.
+    context:
+      history: messages
+
+  to_concierge:
+    to: concierge
+    when: The caller changes to a request owned by another specialist.
+    context:
+      history: messages
+
+escalations:
+  to_manager:
+    when: The caller explicitly asks for a manager or is clearly and strongly frustrated.
+    cold:
+      destination: manager_line
+      ring_timeout: 30s
+      on_unavailable: hangup
+
+shapes:
+  - name: Appointment
+    description: The latest booking successfully created, moved, or cancelled.
+    fields:
+      - booking_id: Id
+      - service: Literal["haircut", "hair-color", "blowout"]
+      - date: Date
+      - time: Time
+      - action: Literal["create", "modify", "cancel"]
+
+  - name: Complaint
+    description: One recorded complaint; a requested resolution is not an approval.
+    fields:
+      - complaint_id: Id
+      - summary: str
+      - requested_resolution: str
+
+# One booking request, start to finish, with no owner request between the two
+# steps. Verification is skipped when the caller's number is already confirmed,
+# which is every booking after the first on a call.
+task_groups:
+  book:
+    when: >-
+      The caller wants to create, move or cancel a booking. Includes a change to
+      an appointment just made.
+    steps:
+      - task: verify_customer
+        skip_when_confirmed: customer_phone
+      - manage_booking
+    context_scope: shared
+    then: return
+
+variables:
+  customer_status:
+    type: Literal["existing", "created", "invalid"]
+    description: The customer lookup status saved after the caller confirms their number.
+
+  appointment:
+    type: Appointment
+    description: The latest successful booking action, saved only after the tool succeeds.
+
+  complaints:
+    type: list[Complaint]
+    description: Complaints recorded during this call.
+
+  booking_date:
+    type: Date
+    default: ""
+    description: >-
+      Today's date in the salon's own timezone, YYYY-MM-DD. Read once from the
+      clock before the greeting, so a caller saying "tomorrow" costs one model
+      request instead of two chained tool calls. A call that crosses midnight
+      keeps the day it started on, which is deliberate: a date changing
+      underneath a conversation would leave the caller and the agent disagreeing
+      about what "tomorrow" means halfway through.
+
+  booking_weekday:
+    type: string
+    default: ""
+    description: >-
+      The weekday today falls on, spelled out in English: Monday to Sunday. From
+      the same clock reading as `booking_date`, so the two cannot disagree about
+      which day it is. It is what lets the agent answer "next Friday" without a
+      second turn working out what day today is first.
+
+  salon_local_time:
+    type: Time
+    default: ""
+    description: >-
+      The salon's own wall clock when the call began, HH:MM on a 24 hour clock.
+      From the same reading as the two above. It is what lets the agent know that
+      a caller asking for "this afternoon" at 17:40 is asking for something that
+      has nearly passed, rather than offering them a slot that is already gone.
+
+  customer_phone:
+    type: Phone
+    default: ""
+    confirm: verify_customer
+    description: >-
+      The caller's phone number in E.164: a plus sign, then digits, with no
+      spaces, brackets or dashes. One shape for every phone number in this
+      package, the MANAGER_PHONE_NUMBER transfer destination included, so no
+      prompt and no tool has to guess which shape it is holding.
+
+      No `source:` here on purpose. The prefetch block below reads the carrier's
+      fact and this variable receives it, which leaves the per-route refusal for
+      a variable naming a source its target cannot supply exactly as strict as it
+      is: on a route with no caller ID the entry skips and this holds its default.
+
+      Offered to the caller for a yes, never acted on unasked. Somebody may be
+      ringing from a friend's phone, or may hold a second account, so until the
+      verification step has heard them agree this value stays unconfirmed and
+      appears in no prompt but that step's own.
+
+  customer_name:
+    type: string
+    default: ""
+    description: >-
+      The name on the record the caller's number belongs to, looked up before the
+      greeting. Inherits `customer_phone`'s confirming step, because a name found
+      from a number nobody has agreed to is exactly as unconfirmed as that number
+      was: greeting a stranger by the account holder's name is the worst thing
+      this feature could do, and the compiler refuses the prompt that would.
+
+  customer_on_file:
+    type: string
+    default: ""
+    description: >-
+      Whether the caller's number was already on file: `existing` or `unknown`.
+      From the same lookup as `customer_name`, in the same call. It is here to
+      show that one entry fills as many variables as the result has fields, and
+      it earns its place: the agent greets a returning customer differently from
+      somebody ringing for the first time, and asking would waste a turn.
+
+      Inherits `customer_phone`'s confirming step, exactly as `customer_name`
+      does, because a status found from a number nobody agreed to is as
+      unconfirmed as that number was.
+
+  confirmation_contact:
+    type: NameEmail
+    description: >-
+      Who the confirmation goes to, name and email address held apart. The type
+      is one this compiler supplies, so the two parts are readable separately:
+      the agent can say whose name the booking is under without reading an
+      address out loud, which is what nobody wants over the phone.
+
+      Also takes the whole thing as one string, so a tool returning
+      `Fred Bloggs <fred@example.com>` needs nothing written here to be
+      understood. The address itself is checked by email-validator, with no DNS
+      lookup, because this runs inside a turn and a slow resolver would hold the
+      caller in silence.
+
+  confirmation_email:
+    type: EmailStr
+    default: ""
+    description: >-
+      The address on its own, plain text a tool can post to as it stands. Taken
+      off `confirmation_contact` rather than asked for again, so the caller
+      spells it out once and both values are filled from that one answer.
+
+prefetch:
+  - name: today
+    clock: now
+    timezone: Europe/Madrid
+    assign:
+      - booking_date: result.date
+      - booking_weekday: result.day_of_week
+      - salon_local_time: result.time
+
+  - name: caller
+    source: from_number
+    assign:
+      - customer_phone: result.value
+
+  - name: profile
+    tool: look_up_customer
+    writes: false
+    args:
+      - phone: "{{customer_phone}}"
+    assign:
+      - customer_name: result.name
+      - customer_on_file: result.status
+
+secrets:
+  - GOOGLE_API_KEY
+  - OPENAI_API_KEY
+  - SLNG_API_KEY
+  - LANGFUSE_SECRET_KEY
+  - LANGFUSE_PUBLIC_KEY
+  - LANGFUSE_BASE_URL
+  - MANAGER_PHONE_NUMBER
+  - TWILIO_ACCOUNT_SID
+  - TWILIO_AUTH_TOKEN
+  - TWILIO_PHONE_NUMBER
+  - SIP_TRUNK_HOSTNAME
+  - SIP_AUTH_USERNAME
+  - SIP_AUTH_PASSWORD
+  - SIP_FROM_NUMBER
+
+destinations:
+  manager_line: MANAGER_PHONE_NUMBER
+
+knowledge:
+  refunds:
+    documents: knowledge/refunds
+  services:
+    documents: knowledge/services
+    chunk_size: 220
+    chunk_overlap: 40
+
+models:
+  think:
+    reasoning:
+      provider: google
+      model: gemini-3.5-flash-lite
+      params:
+        vertexai: true
+        location: eu
+        thinking_config:
+          thinking_level: minimal
+  speak:
+    voice:
+      provider: slng
+      model: "cartesia/sonic:3.5"
+      voice: "62ae83ad-4f6a-430b-af41-a9bede9286ca"
+      language: en
+      params:
+        world_part: eu-north
+        warm_standby_enabled: true
+  listen:
+    transcriber:
+      provider: slng
+      model: "soniox/speech-ai:rt-v5"
+      language: en
+      params:
+        world_part: eu-north
+  turn:
+    detector:
+      provider: local
+      model: silero
+      pace: balanced
+
+tools:
+  - find_or_create_customer
+  - look_up_customer
+  - look_up_refund_policy
+  - look_up_salon_info
+  - list_bookings
+  - check_availability
+  - create_booking
+  - modify_booking
+  - cancel_booking
+  - record_complaint
+  - end_call
+
+conversation:
+  greeting:
+    speaks_first: agent
+    text: "Hi, you've reached Sage and Stone. Robin speaking, what can I do for you?"
+  interruption:
+    enabled: true
+  inactivity:
+    nudge_after: 15s
+    end_after: 45s
+  max_duration: 15m
+
+tracing:
+  provider: langfuse
+
+channels:
+  web:
+    kind: realtime_audio
+  phone:
+    kind: telephony
+    inbound: true
+    outbound: false
+
+capacity:
+  peak_sessions: 5
+  max_sessions: 10
+  peak_starts_per_second: 1
+  avg_session_duration: 5m
