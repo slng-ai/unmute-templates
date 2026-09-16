@@ -1,0 +1,204 @@
+version: 1
+
+name: dispute-intake
+
+entry_agent: ar_desk
+
+agents:
+  ar_desk:
+    instructions: instructions.md
+    think: reasoning
+    speak: voice
+    tools:
+      - end_call
+    # Neither task carries a `when:`. The group below is their only trigger, so
+    # the order is a guarantee rather than a line in a prompt asking for one.
+    tasks:
+      - name: confirm_invoice
+        instructions: tasks/confirm-invoice.md
+        tools:
+          - dispute_desk
+        assign:
+          - invoice: result.invoice
+          - invoice_number: result.invoice.invoice_number
+        context:
+          history: messages
+
+      # The announce covers the two model requests it costs to enter a step,
+      # which were silence. It is safe to speak every time: by the time this
+      # step opens the caller has already agreed which invoice it is, so the
+      # line is never redundant, and no tool runs before it to contradict it.
+      - name: record_dispute
+        instructions: tasks/record-dispute.md
+        announce: Right, let me take the details down.
+        tools:
+          - dispute_desk
+        # The tool already decided this, so asking the model to call finish
+        # after it would spend a request on a settled question. A result
+        # carrying status recorded saves the case and ends the step with no
+        # model request in between.
+        finish:
+          - tool: dispute_desk
+            success:
+              - status: recorded
+        assign:
+          - dispute_case: result.case
+        context:
+          history: messages
+    task_groups:
+      - intake
+
+# Two steps, one order, one running conversation. Nobody can be talked into
+# logging a dispute against an invoice that was never looked up, because the
+# second step does not exist until the first one has finished.
+task_groups:
+  intake:
+    when: >-
+      The caller says something is wrong with an invoice: a wrong price, a
+      quantity that does not match, a duplicate, goods that never arrived, tax
+      that looks wrong, or a purchase order number that is not theirs.
+    steps:
+      - confirm_invoice
+      - record_dispute
+    context_scope: shared
+    then: return
+
+shapes:
+  - name: Invoice
+    description: The invoice the caller agreed the dispute is about.
+    fields:
+      - invoice_number: Id
+      - account: str
+      - issued_on: Date
+      - due_on: Date
+      - amount: float
+      - currency: Literal["EUR", "GBP", "USD"]
+      - status: Literal["open", "overdue", "paid", "in_dispute"]
+
+  - name: DisputeCase
+    description: The case the desk opened, exactly as the tool returned it.
+    fields:
+      - case_id: Id
+      - invoice_number: Id
+      - reason: Literal["pricing", "quantity", "duplicate_invoice", "goods_not_received", "service_quality", "tax_or_vat", "wrong_po_number", "other"]
+      - disputed_amount: float
+      - rest_will_be_paid: bool
+      - raised_by: str
+      - evidence: list[str]
+      - routed_to: Literal["billing", "sales", "logistics", "tax"]
+      - opened_on: Date
+
+# A description here is written for the model, not for the next author: every
+# variable a step assigns becomes a parameter on that step's finish call, and
+# this text is the only thing the model is told about it. The reasoning an
+# author wants is in the `#` comments, which reach nothing.
+variables:
+  invoice:
+    type: Invoice
+    description: >-
+      The invoice the lookup returned and the caller agreed to, exactly as it
+      came back. Fill it only after the caller has said it is the right one.
+
+  # Taken off `invoice` with a dotted assign, so the number can be read back
+  # and written into the second step's prompt without rendering the whole
+  # invoice into it.
+  invoice_number:
+    type: Id
+    default: ""
+    description: The number of the invoice in dispute, on its own.
+
+  # No dotted case_id beside this one. A step that ends on its tool relays the
+  # tool's own result, and the fields it may save are that tool's own output
+  # properties, so one level down is not reachable here. The agent's prompt
+  # reads {{dispute_case.case_id}} instead, which costs nothing.
+  dispute_case:
+    type: DisputeCase
+    description: >-
+      The dispute case the desk opened. The tool writes it, never you.
+
+  today_date:
+    type: Date
+    default: ""
+    description: Today's date at the desk, written year-month-day.
+
+prefetch:
+  - name: today
+    clock: now
+    # The zone sits on the entry, not the package: two entries could honestly
+    # want two zones. Not the container clock, which is UTC and would name the
+    # wrong day for anybody who is not on it.
+    timezone: Europe/Madrid
+    assign:
+      - today_date: result.date
+
+secrets:
+  - GOOGLE_API_KEY
+  - SLNG_API_KEY
+
+models:
+  think:
+    reasoning:
+      description: dispute intake reasoning
+      provider: google
+      model: gemini-3.5-flash-lite
+      params:
+        vertexai: true
+        location: eu
+        thinking_config:
+          thinking_level: minimal
+  speak:
+    voice:
+      description: dispute intake voice
+      provider: slng
+      model: "cartesia/sonic:3.5"
+      voice: "62ae83ad-4f6a-430b-af41-a9bede9286ca"
+      language: en
+      params:
+        world_part: eu-north
+        warm_standby_enabled: true
+  listen:
+    transcriber:
+      provider: slng
+      model: "soniox/speech-ai:rt-v5"
+      language: en
+      params:
+        world_part: eu-north
+  turn:
+    detector:
+      provider: local
+      model: silero
+      # patient, not balanced. This desk asks people to read out an invoice
+      # number and an amount, and they pause between the groups of digits. A
+      # shorter ceiling closes the turn halfway through "one oh four, two
+      # eight" and the agent answers a number the caller had not finished
+      # saying. The floor does not move either way, so a turn where the caller
+      # really has finished costs nothing extra.
+      pace: patient
+
+tools:
+  - dispute_desk
+  - end_call
+
+conversation:
+  greeting:
+    speaks_first: agent
+    # Names no saved value. A greeting renders once at session start, and the
+    # only thing settled before the first word here is the date, which nobody
+    # wants read at them.
+    text: "Hi, you're through to the billing desk at Northwind Supply. What's the trouble with your invoice?"
+  interruption:
+    enabled: true
+  inactivity:
+    nudge_after: 15s
+    end_after: 45s
+  max_duration: 10m
+
+channels:
+  web:
+    kind: realtime_audio
+
+capacity:
+  peak_sessions: 2
+  max_sessions: 5
+  peak_starts_per_second: 1
+  avg_session_duration: 4m
