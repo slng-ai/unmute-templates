@@ -1,0 +1,162 @@
+description: >-
+  The support line's one tool. Pick what it does with `action`. Use
+  answer_question for anything the same for every customer, verify_account to
+  check who you are speaking to before you touch their account, and open_ticket
+  when the problem needs a person. Never use answer_question for a question
+  about one customer's own bill, plan or line: those answers come from the
+  account, not from here.
+
+# One tool, three actions, one argument list. Each action ignores the arguments
+# it does not need, which is why only `action` is required: a general question
+# that had to send an account number and a postcode would be a worse contract,
+# not a safer one.
+#
+# An optional property is passed on every call as an empty string, so the
+# handler treats "" as "not given" rather than relying on a Python default.
+input:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - answer_question
+        - verify_account
+        - open_ticket
+      description: Which of the three things to do.
+    topic:
+      type: string
+      enum:
+        - opening_hours
+        - payment_methods
+        - moving_home
+        - cancellation_notice
+        - router_reset
+        - speed_test
+      description: >-
+        Which common question the caller is asking, in one of the six words
+        listed. Work it out from what they said rather than reading the list to
+        them. Needed by answer_question.
+    account_number:
+      type: string
+      description: >-
+        The account number the caller read out, as it is printed on the bill.
+        It starts with the letters B W. Needed by verify_account and
+        open_ticket.
+    postcode:
+      type: string
+      description: >-
+        The postcode of the address the service is at, as the caller said it.
+        The second half of the check, and needed by verify_account and
+        open_ticket both. Send the one the caller gave on this call.
+    category:
+      type: string
+      enum:
+        - no_service
+        - slow_speed
+        - billing_error
+        - engineer_visit
+        - complaint
+        - other
+      description: >-
+        What kind of problem the ticket is about, in one of the six words
+        listed. This decides which team picks it up and how fast, so choose it
+        from the problem and not from how upset the caller sounds.
+    summary:
+      type: string
+      description: >-
+        One or two sentences in the caller's own words saying what is wrong and
+        what they have already tried. This is the first thing the person picking
+        the ticket up reads.
+  required:
+    - action
+
+# `output:` is documentation for whoever wires this to a real system, not a
+# contract with the model: no generator sends it anywhere and no target
+# enforces it. It is written out in full anyway, because it is the list of
+# fields a CRM has to come back with for the prompts above to keep working.
+output:
+  type: object
+  properties:
+    status:
+      type: string
+      enum:
+        - answered
+        - verified
+        - not_matched
+        - opened
+        - rejected
+    answer:
+      type: string
+    account:
+      type: object
+      properties:
+        account_number:
+          type: string
+        customer_name:
+          type: string
+        postcode:
+          type: string
+        plan:
+          type: string
+          enum:
+            - essential
+            - family
+            - fibre_plus
+        monthly_price:
+          type: number
+        next_bill_on:
+          type: string
+        balance:
+          type: number
+        service_status:
+          type: string
+          enum:
+            - active
+            - suspended
+            - fault_reported
+    ticket:
+      type: object
+      properties:
+        ticket_id:
+          type: string
+        account_number:
+          type: string
+        category:
+          type: string
+          enum:
+            - no_service
+            - slow_speed
+            - billing_error
+            - engineer_visit
+            - complaint
+            - other
+        summary:
+          type: string
+        priority:
+          type: string
+          enum:
+            - normal
+            - high
+        team:
+          type: string
+          enum:
+            - network
+            - billing
+            - customer_relations
+            - support
+        raised_on:
+          type: string
+        callback_by:
+          type: string
+    problem:
+      type: string
+  required:
+    - status
+
+local:
+  handler: tools/support_desk.py
+
+# No announce. Every action here is an in-process dictionary read, so a line
+# covering the wait would be longer than the wait.
+interruption: provider_default
+effect: returns_data
