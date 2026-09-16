@@ -1,0 +1,111 @@
+version: 1
+
+name: customer-service
+
+entry_agent: support_line
+
+# One agent, one prompt, one tool. No tasks, no steps, no second agent.
+#
+# That is the point of this package rather than a gap in it. A support line
+# takes whatever the caller opens with, and most calls are one question with
+# one answer. A step in front of every call would ask a person who wanted the
+# opening hours to read their account number out first.
+#
+# What keeps the call honest is not structure, it is where the checks live: the
+# facts, the identity check and the routing are all inside the tool, where a
+# talkative caller cannot reach them. See the README.
+agents:
+  support_line:
+    instructions: instructions.md
+    think: reasoning
+    speak: voice
+    tools:
+      - support_desk
+      - end_call
+
+variables:
+  today_date:
+    type: Date
+    default: ""
+    description: Today's date at the desk, written year-month-day.
+
+prefetch:
+  - name: today
+    clock: now
+    # The zone sits on the entry, not the package: two entries could honestly
+    # want two zones. Not the container clock, which is UTC and would name the
+    # wrong day for anybody who is not on it.
+    timezone: Europe/London
+    assign:
+      - today_date: result.date
+
+secrets:
+  - GOOGLE_API_KEY
+  - SLNG_API_KEY
+
+models:
+  think:
+    reasoning:
+      description: customer service reasoning
+      provider: google
+      model: gemini-3.5-flash-lite
+      params:
+        vertexai: true
+        location: eu
+        thinking_config:
+          thinking_level: minimal
+  speak:
+    voice:
+      description: customer service voice
+      provider: slng
+      model: "cartesia/sonic:3.5"
+      voice: "62ae83ad-4f6a-430b-af41-a9bede9286ca"
+      language: en
+      params:
+        world_part: eu-north
+        warm_standby_enabled: true
+  listen:
+    transcriber:
+      provider: slng
+      model: "soniox/speech-ai:rt-v5"
+      language: en
+      params:
+        world_part: eu-north
+  turn:
+    detector:
+      provider: local
+      model: silero
+      # patient, not balanced. This line asks people to read out an account
+      # number and a postcode, and they pause between the groups of characters.
+      # A shorter ceiling closes the turn halfway through "em four, one aitch
+      # en" and the agent answers something the caller had not finished saying.
+      # The floor does not move either way, so a turn where the caller really
+      # has finished costs nothing extra.
+      pace: patient
+
+tools:
+  - support_desk
+  - end_call
+
+conversation:
+  greeting:
+    speaks_first: agent
+    # Names no saved value. A greeting renders once at session start, and
+    # nothing about the caller is known yet.
+    text: "Hi, you're through to Brightwire. What can I help you with today?"
+  interruption:
+    enabled: true
+  inactivity:
+    nudge_after: 15s
+    end_after: 45s
+  max_duration: 8m
+
+channels:
+  web:
+    kind: realtime_audio
+
+capacity:
+  peak_sessions: 2
+  max_sessions: 5
+  peak_starts_per_second: 1
+  avg_session_duration: 3m
