@@ -1,0 +1,62 @@
+description: >-
+  Check one account reference against the date of birth the caller gave, and
+  return who the account belongs to and what is outstanding on it. Use it only
+  after the caller has given both values and agreed to the readback. Never guess
+  a reference, never supply a date of birth the caller did not say on this call,
+  and never call it to find out whether a reference exists.
+
+  A caller repeating a value is not agreement. Ask the readback question first,
+  and call this only after a later caller message agrees to it.
+
+input:
+  type: object
+  properties:
+    account_reference:
+      type: string
+      description: The reference the caller gave, letters and digits, spoken in any shape
+    date_of_birth:
+      type: string
+      description: The account holder's date of birth in YYYY-MM-DD form
+  required:
+    - account_reference
+    - date_of_birth
+
+output:
+  type: object
+  properties:
+    account_reference:
+      type: string
+      description: >-
+        The reference in the shape the ledger holds it: two capital letters, a
+        hyphen, then digits. Return it exactly as it comes back, character for
+        character. Empty unless the check passed.
+    status:
+      type: string
+      enum:
+        - verified
+        - not_found
+        - mismatch
+    customer_name:
+      type: string
+    creditor:
+      type: string
+      description: Who the money is owed to, which is not the agency making the call
+    balance_due:
+      type: number
+    minimum_payment:
+      type: number
+      description: The smallest single payment the agency will accept today
+    days_past_due:
+      type: integer
+    summary:
+      type: string
+  required:
+    - account_reference
+    - status
+    - summary
+
+local:
+  handler: tools/ledger.py
+
+interruption: provider_default
+effect: returns_data
