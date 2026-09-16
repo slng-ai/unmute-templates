@@ -1,0 +1,67 @@
+description: >-
+  Check one customer number against an invoice number the caller is reading off
+  their own paperwork, and return who the account belongs to and what is open on
+  it. Use it only after the caller has given both values and agreed to the
+  readback. Never guess a customer number, never supply an invoice number the
+  caller did not say on this call, and never call it to find out whether a
+  number exists.
+
+  A caller repeating a value is not agreement. Ask the readback question first,
+  and call this only after a later caller message agrees to it.
+
+input:
+  type: object
+  properties:
+    account_reference:
+      type: string
+      description: The customer number the caller gave, letters and digits, spoken in any shape
+    invoice_number:
+      type: string
+      description: >-
+        Any invoice number the caller can see on the account, spoken in any
+        shape. It is the second half of the check: only somebody holding the
+        paperwork has one.
+  required:
+    - account_reference
+    - invoice_number
+
+output:
+  type: object
+  properties:
+    account_reference:
+      type: string
+      description: >-
+        The customer number in the shape the ledger holds it: letters, a hyphen,
+        then digits. Return it exactly as it comes back, character for
+        character. Empty unless the check passed.
+    status:
+      type: string
+      enum:
+        - verified
+        - not_found
+        - mismatch
+    company_name:
+      type: string
+    contact_name:
+      type: string
+      description: The accounts payable contact on file, who may not be the person on the call
+    total_outstanding:
+      type: number
+      description: Everything open on the account in pounds, due and overdue together
+    overdue_amount:
+      type: number
+      description: The part of it that is past its due date. Zero means the call is a courtesy one.
+    oldest_days_overdue:
+      type: integer
+    summary:
+      type: string
+  required:
+    - account_reference
+    - status
+    - summary
+
+local:
+  handler: tools/receivables.py
+
+interruption: provider_default
+effect: returns_data
