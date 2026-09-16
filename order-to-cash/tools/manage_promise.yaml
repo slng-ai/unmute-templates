@@ -1,0 +1,135 @@
+description: >-
+  Do one thing with the verified account's promise to pay. Record what the
+  caller committed to, cancel what is on the account, or read back what is
+  already there. A promise is a commitment to a date and an amount; it moves no
+  money and takes no card details. The account comes from verification and is
+  never supplied or guessed by you.
+
+  An account holds one promise at a time. Recording a second one over an
+  existing one is refused; cancel the old one first, or the caller is being told
+  their arrangement changed when it did not.
+
+input:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - promise
+        - cancel
+        - list
+      description: >-
+        promise records what the caller agreed to pay and when. cancel removes
+        the promise on the account. list reads back what is on the account and
+        changes nothing.
+    invoice_number:
+      type: string
+      description: >-
+        The one invoice the promise covers, spoken in any shape. Send an empty
+        string when the promise is against the account as a whole, which is what
+        "I'll clear the lot" means. Send an empty string for cancel and list.
+    amount:
+      type: number
+      description: >-
+        The amount in pounds the caller committed to. It cannot be more than the
+        invoice, or more than the whole account when no invoice is named. Send 0
+        for cancel and list.
+    pay_date:
+      type: string
+      description: >-
+        The day the money leaves them, in YYYY-MM-DD form. It has to be after
+        today and within 60 days. Send an empty string for cancel and list.
+    method:
+      type: string
+      enum:
+        - bank_transfer
+        - card_link
+        - direct_debit
+      description: >-
+        How they say they will pay. Send bank_transfer for cancel and list.
+    confirmed:
+      type: boolean
+      description: >-
+        True only after the caller has agreed to this exact amount and date.
+        Send false for list.
+  required:
+    - action
+    - invoice_number
+    - amount
+    - pay_date
+    - method
+    - confirmed
+
+inject:
+  - account_reference: "{{account_reference}}"
+
+output:
+  type: object
+  properties:
+    status:
+      type: string
+      enum:
+        - promised
+        - cancelled
+        - listed
+        - not_confirmed
+        - invalid_amount
+        - invalid_date
+        - invalid_method
+        - invoice_not_found
+        - invoice_disputed
+        - has_promise
+        - nothing_to_cancel
+        - account_not_found
+    summary:
+      type: string
+    payable_amount:
+      type: number
+      description: >-
+        What can still be promised against: everything open, less anything on
+        hold for a dispute.
+    promise:
+      type: object
+      description: >-
+        The saved promise, present and complete on success and absent otherwise.
+        The step saves this without asking the model for it.
+      properties:
+        promise_id:
+          type: string
+        invoice_number:
+          type: string
+        amount:
+          type: number
+        pay_date:
+          type: string
+        method:
+          type: string
+          enum:
+            - bank_transfer
+            - card_link
+            - direct_debit
+    promises:
+      type: array
+      description: What the account already holds, returned by list and by has_promise
+      items:
+        type: object
+        properties:
+          promise_id:
+            type: string
+          invoice_number:
+            type: string
+          amount:
+            type: number
+          pay_date:
+            type: string
+          method:
+            type: string
+  required:
+    - status
+    - summary
+
+local:
+  handler: tools/receivables.py
+
+interruption: provider_default
+effect: returns_data

@@ -1,0 +1,102 @@
+description: >-
+  Read what is open on the verified account, or send a copy of it out. Pick the
+  action that matches what the caller asked for: the list of open invoices, the
+  lines that make one invoice up, or a copy emailed to the address on file. This
+  changes no balance and commits the caller to nothing, so it needs no
+  agreement from them. The account comes from verification and is never supplied
+  or guessed by you.
+
+  Read before you speak. Amounts, due dates and invoice numbers come from here,
+  never from memory and never from earlier in the call.
+
+input:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - list
+        - detail
+        - send_copy
+      description: >-
+        list reads every open invoice with its amount, due date and whether it is
+        late. detail reads the lines on one invoice, which is what somebody
+        querying a charge is asking for. send_copy emails a copy to the address
+        on file.
+    invoice_number:
+      type: string
+      description: >-
+        Which invoice, spoken in any shape. Required for detail. For send_copy an
+        empty string sends the whole statement instead of one invoice. Send an
+        empty string for list.
+  required:
+    - action
+    - invoice_number
+
+inject:
+  - account_reference: "{{account_reference}}"
+
+output:
+  type: object
+  properties:
+    status:
+      type: string
+      enum:
+        - listed
+        - detailed
+        - sent
+        - invoice_not_found
+        - account_not_found
+    summary:
+      type: string
+    total_outstanding:
+      type: number
+    overdue_amount:
+      type: number
+    sent_to:
+      type: string
+      description: The address the copy went to, returned by send_copy
+    invoices:
+      type: array
+      description: The open invoices, oldest due date first
+      items:
+        type: object
+        properties:
+          invoice_number:
+            type: string
+          amount:
+            type: number
+          due_date:
+            type: string
+          days_overdue:
+            type: integer
+          status:
+            type: string
+            enum:
+              - due
+              - overdue
+              - on_hold
+            description: >-
+              on_hold means a dispute is open on it, so it is not being chased
+              and cannot be promised against.
+    lines:
+      type: array
+      description: The lines that make one invoice up, returned by detail
+      items:
+        type: object
+        properties:
+          description:
+            type: string
+          quantity:
+            type: integer
+          amount:
+            type: number
+  required:
+    - status
+    - summary
+
+local:
+  handler: tools/receivables.py
+
+interruption: provider_default
+effect: returns_data

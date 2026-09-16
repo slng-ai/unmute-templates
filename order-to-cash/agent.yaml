@@ -1,0 +1,301 @@
+version: 1
+
+name: order-to-cash
+
+entry_agent: receivables_agent
+
+agents:
+  receivables_agent:
+    instructions: instructions.md
+    think: reasoning
+    speak: voice
+    tools:
+      - manage_invoices
+      - end_call
+    tasks:
+      - name: verify_contact
+        when: >-
+          Run only when the caller explicitly corrects the customer number or the
+          invoice number they already gave. Every other route into verification
+          goes through the chase flow, which runs this step itself when the
+          account is not confirmed. Asking what is outstanding is not a
+          correction.
+        instructions: tasks/verify-contact.md
+        tools:
+          - verify_billing_contact
+        finish:
+          - tool: verify_billing_contact
+            success:
+              - status:
+                  - verified
+        assign:
+          - account_reference: result.account_reference
+          - company_name: result.company_name
+          - contact_name: result.contact_name
+          - total_outstanding: result.total_outstanding
+          - overdue_amount: result.overdue_amount
+          - oldest_days_overdue: result.oldest_days_overdue
+        context:
+          history: messages
+
+      - name: secure_promise
+        instructions: tasks/secure-promise.md
+        tools:
+          - manage_invoices
+          - manage_promise
+        handoffs:
+          - to_billing
+        finish:
+          - tool: manage_promise
+            success:
+              - status:
+                  - promised
+        assign:
+          - promise: result.promise
+        context:
+          history: messages
+    task_groups:
+      - chase
+    handoffs:
+      - to_billing
+
+  billing_specialist:
+    instructions: agents/billing-specialist.md
+    think: reasoning
+    speak: voice
+    tools:
+      - manage_invoices
+      - end_call
+    tasks:
+      # Deliberately not verify_contact. The receivables agent is the only one
+      # that verifies. A task in reach beats a prompt rule, so the task is not
+      # listed here. Every tool that needs the account refuses while it is
+      # unconfirmed, and to_receivables is the way back.
+      - name: intake_dispute
+        when: The verified caller wants a dispute recorded against one invoice.
+        instructions: tasks/intake-dispute.md
+        tools:
+          - manage_invoices
+          - manage_dispute
+        handoffs:
+          - to_receivables
+        finish:
+          - tool: manage_dispute
+            success:
+              - status:
+                  - opened
+        assign:
+          - disputes+: result.dispute
+        context:
+          history: messages
+    handoffs:
+      - to_receivables
+
+handoffs:
+  to_billing:
+    to: billing_specialist
+    when: >-
+      The caller queries what an invoice is for, challenges a charge, says goods
+      or a service never arrived, says the invoice was already paid, or says it
+      is a duplicate.
+    context:
+      history: messages
+
+  to_receivables:
+    to: receivables_agent
+    when: The caller wants to pay, or asks about a payment date, rather than query a charge.
+    context:
+      history: messages
+
+shapes:
+  - name: Promise
+    description: >-
+      What the caller committed to pay and when, saved only after it was
+      recorded. A promise moves no money; it is the date the ledger will chase
+      against if nothing arrives.
+    fields:
+      - promise_id: Id
+      - invoice_number: str
+      - amount: float
+      - pay_date: Date
+      - method: Literal["bank_transfer", "card_link", "direct_debit"]
+
+  - name: Dispute
+    description: >-
+      One dispute opened on this call, against one invoice. Opening one records
+      what the caller says and puts that invoice on hold; it is not an agreement
+      that they are right, and it credits nothing.
+    fields:
+      - dispute_id: Id
+      - invoice_number: str
+      - reason_code: Literal["pricing", "quantity", "damaged", "not_received", "duplicate", "already_paid", "other"]
+      - detail: str
+      - amount_disputed: float
+
+# One request about paying, start to finish, with no owner request between the
+# two steps. Verification is skipped when the account is already confirmed,
+# which is every promise after the first on a call.
+task_groups:
+  chase:
+    when: >-
+      The caller wants to pay, move a payment date, or asks what is outstanding.
+      Includes a change to a promise just made.
+    steps:
+      - task: verify_contact
+        skip_when_confirmed: account_reference
+      - secure_promise
+    context_scope: shared
+    then: return
+
+variables:
+  current_date:
+    type: Date
+    default: ""
+    description: >-
+      Today's date where the seller works, YYYY-MM-DD. Read once from the clock
+      before the greeting, so a caller saying "the end of the month" costs one
+      model request instead of two chained tool calls. A call that crosses
+      midnight keeps the day it started on, which is deliberate: a date changing
+      underneath a conversation would leave the caller and the agent disagreeing
+      about when the money is coming.
+
+  current_weekday:
+    type: str
+    default: ""
+    description: >-
+      The weekday today falls on, spelled out in English: Monday to Sunday. From
+      the same clock reading as current_date, so the two cannot disagree about
+      which day it is. It is what lets the agent turn "a week on Friday, when our
+      run goes out" into a real date without a second turn.
+
+  account_reference:
+    type: Id
+    default: ""
+    confirm: verify_contact
+    description: >-
+      The customer account the caller is calling about, in the shape the ledger
+      holds it: letters, a hyphen, then digits. One shape everywhere in this
+      package, so no prompt and no tool has to guess which one it is holding.
+
+      Offered to the caller for a yes, never acted on unasked. Until the
+      verification step has heard them agree, this value appears in no prompt but
+      that step's own, and every tool holding it refuses. Amounts, due dates and
+      invoice numbers are a company's business, and they are not read out to
+      somebody who has not shown they work there.
+
+  company_name:
+    type: str
+    default: ""
+    description: >-
+      The customer company on the account, from the same check that verified it.
+      The caller works for them; the agent does not.
+
+  contact_name:
+    type: str
+    default: ""
+    description: >-
+      The accounts payable contact on file. Often not the person who picked up,
+      so it is something to check against rather than a name to greet them with.
+
+  total_outstanding:
+    type: float
+    default: 0.0
+    description: >-
+      Everything open on the account in pounds, due and overdue together, as the
+      ledger had it at verification. Reading an invoice later in the call does
+      not rewrite this, so use the newest figure a tool returned once one has
+      run.
+
+  overdue_amount:
+    type: float
+    default: 0.0
+    description: >-
+      The part of the balance that is past its due date. Zero with something
+      outstanding is the whole difference between the two calls this package
+      makes: a courtesy reminder before the money is late, and a follow-up after.
+
+  oldest_days_overdue:
+    type: int
+    default: 0
+    description: >-
+      How long the oldest late invoice has been late. It changes what the agent
+      leads with, not how hard it pushes.
+
+  promise:
+    type: Promise | None
+    description: The latest promise to pay, saved only after the tool recorded it.
+
+  disputes:
+    type: list[Dispute]
+    description: Disputes opened during this call.
+
+prefetch:
+  - name: today
+    clock: now
+    timezone: Europe/London
+    assign:
+      - current_date: result.date
+      - current_weekday: result.day_of_week
+
+secrets:
+  - GOOGLE_API_KEY
+  - SLNG_API_KEY
+
+models:
+  think:
+    reasoning:
+      provider: google
+      model: gemini-3.5-flash-lite
+      params:
+        vertexai: true
+        location: eu
+        thinking_config:
+          thinking_level: minimal
+  speak:
+    voice:
+      provider: slng
+      model: "cartesia/sonic:3.5"
+      voice: "62ae83ad-4f6a-430b-af41-a9bede9286ca"
+      language: en
+      params:
+        world_part: eu-north
+        warm_standby_enabled: true
+  listen:
+    transcriber:
+      provider: slng
+      model: "soniox/speech-ai:rt-v5"
+      language: en
+      params:
+        world_part: eu-north
+  turn:
+    detector:
+      provider: local
+      model: silero
+      pace: balanced
+
+tools:
+  - verify_billing_contact
+  - manage_invoices
+  - manage_promise
+  - manage_dispute
+  - end_call
+
+conversation:
+  greeting:
+    speaks_first: agent
+    text: "Hi, this is Sam calling from Ashgrove Industrial, about the account you have with us. Am I through to the right person for paying invoices?"
+  interruption:
+    enabled: true
+  inactivity:
+    nudge_after: 15s
+    end_after: 45s
+  max_duration: 10m
+
+channels:
+  web:
+    kind: realtime_audio
+
+capacity:
+  peak_sessions: 5
+  max_sessions: 10
+  avg_session_duration: 5m
